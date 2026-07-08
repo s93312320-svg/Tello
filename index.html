@@ -540,75 +540,93 @@ async function createRoom(type){
 function selfChatId(){ return me.uid + '_self'; }
 function chatIdFor(otherUid){ return [me.uid, otherUid].sort().join('_'); }
 
+let chatsUnsub = null; // Переменная для хранения слушателя списка чатов
+
 async function loadChatList(){
   const listEl = document.getElementById('chats-list');
+  
+  // Если слушатель уже запущен, не создаем его заново, чтобы не тратить трафик
+  if (chatsUnsub) return;
+
   listEl.innerHTML = '<div class="spinner"></div>';
-  try{
-    const snap = await db.collection('chats')
-      .where('participants', 'array-contains', me.uid)
-      .get();
 
-    let rooms = [];
-    snap.forEach(doc=>{
-      const data = doc.data();
-      if(doc.id === selfChatId()) return;
-      rooms.push({ id: doc.id, ...data });
-    });
-    
-    rooms.sort((a,b)=>{
-      const ta = a.updatedAt ? a.updatedAt.toMillis() : 0;
-      const tb = b.updatedAt ? b.updatedAt.toMillis() : 0;
-      return tb - ta;
-    });
+  // Включаем onSnapshot вместо get() — теперь Firestore сам пришлет данные при любом новом сообщении
+  chatsUnsub = db.collection('chats')
+    .where('participants', 'array-contains', me.uid)
+    .onSnapshot(async (snap) => {
+      let rooms = [];
+      snap.forEach(doc => {
+        const data = doc.data();
+        if(doc.id === selfChatId()) return;
+        rooms.push({ id: doc.id, ...data });
+      });
+      
+      // Сортируем: чаты с самыми свежими сообщениями будут вверху
+      rooms.sort((a,b) => {
+        const ta = a.updatedAt ? a.updatedAt.toMillis() : 0;
+        const tb = b.updatedAt ? b.updatedAt.toMillis() : 0;
+        return tb - ta;
+      });
 
-    listEl.innerHTML = '';
+      listEl.innerHTML = '';
 
-    // Избранное
-    const favRow = document.createElement('div');
-    favRow.className = 'row';
-    favRow.onclick = ()=> openConversation(selfChatId(), { name: 'Избранное', isType: 'self' });
-    favRow.innerHTML = `
-      <div class="avatar" style="background:linear-gradient(135deg,#7c6cf6,#4f8ef7)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3L14.5 9L21 9.5L16 13.8L17.5 20.5L12 17L6.5 20.5L8 13.8L3 9.5L9.5 9L12 3Z" fill="#0a0c10"/></svg></div>
-      <div class="row-meta"><div class="row-top"><div class="row-name">Избранное</div></div><div class="row-preview">Заметки для себя</div></div>`;
-    listEl.appendChild(favRow);
+     // Вкладка "Избранное" всегда сверху
+const favRow = document.createElement('div');
+favRow.className = 'row';
+favRow.onclick = () => openConversation(selfChatId(), { name: 'Избранное', isType: 'self' });
+favRow.innerHTML = `
+  <div class="avatar" style="background:linear-gradient(135deg,#7c6cf6,#4f8ef7)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3L14.5 9L21 9.5L16 13.8L17.5 20.5L12 17L6.5 20.5L8 13.8L3 9.5L9.5 9L12 3Z" fill="#0a0c10"/></svg></div>
+  <div class="row-meta"><div class="row-top"><div class="row-name">Избранное</div></div><div class="row-preview">Заметки для себя</div></div>`;
+listEl.appendChild(favRow);
 
-    for(let r of rooms) {
-      let title = r.name || 'Чат';
-      let avatarHtml = initials(title);
-      let subText = r.lastMessage || 'Нет сообщений';
-      let tagHtml = '';
-
-      if(r.isType === 'group' || r.isType === 'channel'){
-        tagHtml = `<span class="type-tag ${r.isType}">${r.isType === 'group' ? 'группа' : 'канал'}</span>`;
-        if(r.avatarURL) avatarHtml = `<img src="${r.avatarURL}">`;
-      } else {
-        const otherUid = r.participants.find(p => p !== me.uid);
-        if(!peopleCache[otherUid]){
-          const d = await db.collection('users').doc(otherUid).get();
-          peopleCache[otherUid] = d.exists ? d.data() : { name:'Удалённый пользователь', username:'—' };
-        }
-        const p = peopleCache[otherUid];
-        title = p.name || p.username;
-        avatarHtml = p.avatarURL ? `<img src="${p.avatarURL}">` : initials(title);
-        r.peerData = { uid: otherUid, ...p };
+      if (rooms.length === 0 && snap.empty) {
+        // Если кроме Избранного ничего нет
+        return;
       }
 
-      const row = document.createElement('div');
-      row.className = 'row';
-      row.onclick = ()=> openConversation(r.id, r);
-      row.innerHTML = `
-        <div class="avatar">${avatarHtml}</div>
-        <div class="row-meta">
-          <div class="row-top"><div class="row-name">${escapeHtml(title)} ${tagHtml}</div><div class="row-time">${r.updatedAt ? fmtTime(r.updatedAt) : ''}</div></div>
-          <div class="row-preview">${escapeHtml(subText)}</div>
-        </div>`;
-      listEl.appendChild(row);
-    }
-  }catch(e){
-    listEl.innerHTML = `<div class="empty-state"><h3>Не удалось загрузить чаты</h3><p>${escapeHtml(e.message||'')}</p></div>`;
-  }
-}
+      for(let r of rooms) {
+        let title = r.name || 'Чат';
+        let avatarHtml = initials(title);
+        let subText = r.lastMessage || 'Нет сообщений';
+        let tagHtml = '';
 
+        if(r.isType === 'group' || r.isType === 'channel'){
+          tagHtml = `<span class="type-tag ${r.isType}">${r.isType === 'group' ? 'группа' : 'канал'}</span>`;
+          if(r.avatarURL) avatarHtml = `<img src="${r.avatarURL}">`;
+        } else {
+          const otherUid = r.participants.find(p => p !== me.uid);
+          if(!peopleCache[otherUid]){
+            // Дозагружаем данные пользователя, если их нет в кэше
+            const d = await db.collection('users').doc(otherUid).get();
+            peopleCache[otherUid] = d.exists ? d.data() : { name:'Удалённый пользователь', username:'—' };
+          }
+          const p = peopleCache[otherUid];
+          title = p.name || p.username;
+          avatarHtml = p.avatarURL ? `<img src="${p.avatarURL}">` : initials(title);
+          r.peerData = { uid: otherUid, ...p };
+        }
+
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.onclick = () => openConversation(r.id, r);
+        row.innerHTML = `
+          <div class="avatar">${avatarHtml}</div>
+          <div class="row-meta">
+            <div class="row-top"><div class="row-name">${escapeHtml(title)} ${tagHtml}</div><div class="row-time">${r.updatedAt ? fmtTime(r.updatedAt) : ''}</div></div>
+            <div class="row-preview">${escapeHtml(subText)}</div>
+          </div>`;
+        listEl.appendChild(row);
+      }
+    }, err => {
+      listEl.innerHTML = `<div class="empty-state"><h3>Ошибка обновления чатов</h3><p>${escapeHtml(err.message||'')}</p></div>`;
+    });
+}
+async function logout(){
+  if(!confirm('Выйти из аккаунта?')) return;
+  if(msgsUnsub) msgsUnsub();
+  if(chatsUnsub) { chatsUnsub(); chatsUnsub = null; } // Отключаем слушатель списка чатов
+  await auth.signOut();
+}
 /* ===================== CONVERSATION ===================== */
 async function openConversation(chatId, roomData){
   currentChatId = chatId;
