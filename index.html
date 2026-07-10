@@ -136,11 +136,30 @@
   .group-create-footer{ padding:14px 18px calc(env(safe-area-inset-bottom) + 16px); border-top:1px solid var(--line); flex:0 0 auto; }
   .row-del-btn{ margin-left:auto; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--text-faint); flex-shrink:0; }
   .row-del-btn:active{ background:rgba(255,92,124,0.15); color:var(--danger); }
-  .msg-del-btn{ position:absolute; top:-7px; right:-7px; width:20px; height:20px; border-radius:50%; background:var(--bg-panel); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--text-dim); cursor:pointer; }
-  .msg-del-btn:active{ background:var(--danger); color:#fff; border-color:transparent; }
+
   .presence-dot{ position:absolute; bottom:1px; right:1px; width:13px; height:13px; border-radius:50%; border:3px solid var(--bg-deep); z-index:2; }
   .presence-dot.online{ background:#3ecf5f; }
   .presence-dot.offline{ background:#6b7280; }
+
+  .msg-ticks{ display:inline-flex; margin-left:4px; }
+  .msg-ticks svg{ display:block; }
+  .msg-edited-tag{ font-size:10px; opacity:.6; margin-left:4px; }
+
+  .msg-actions{ position:absolute; top:-11px; right:6px; display:flex; gap:4px; }
+  .msg-action-btn{ width:22px; height:22px; border-radius:50%; background:var(--bg-panel); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--text-dim); cursor:pointer; }
+  .msg-action-btn:active{ background:var(--accent-a); color:#fff; border-color:transparent; }
+  .msg-action-btn.danger:active{ background:var(--danger); }
+
+  .msg-reply-quote{ border-left:3px solid var(--accent-b); padding:4px 8px; margin-bottom:6px; border-radius:6px; background:rgba(255,255,255,0.06); cursor:pointer; }
+  .bubble.out .msg-reply-quote{ background:rgba(0,0,0,0.12); }
+  .msg-reply-author{ font-size:11.5px; font-weight:700; color:var(--accent-b); }
+  .msg-reply-snippet{ font-size:12.5px; opacity:.85; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+
+  .reply-preview-bar{ display:flex; align-items:center; gap:10px; padding:8px 14px; border-top:1px solid var(--line); background:var(--bg-panel); }
+  .reply-preview-line{ width:3px; align-self:stretch; background:var(--accent-b); border-radius:2px; flex-shrink:0; }
+  .reply-preview-text{ flex:1; min-width:0; }
+  .reply-preview-author{ font-size:12px; font-weight:700; color:var(--accent-b); }
+  .reply-preview-snippet{ font-size:13px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
   .auth-box{ padding:30px 24px; flex:1; display:flex; flex-direction:column; justify-content:center; }
   .auth-header{ margin-bottom:28px; }
@@ -241,6 +260,14 @@
         <div class="icon-btn" id="conv-delete-btn" style="margin-left:auto;" onclick="deleteCurrentConversation()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 7H19M9 7V4.5C9 4 9.4 3.5 10 3.5H14C14.6 3.5 15 4 15 4.5V7M17 7L16.3 19C16.2 20.1 15.3 21 14.2 21H9.8C8.7 21 7.8 20.1 7.7 19L7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
       </div>
       <div class="conv-body" id="conv-body"></div>
+      <div class="reply-preview-bar" id="reply-preview-bar" style="display:none;">
+        <div class="reply-preview-line"></div>
+        <div class="reply-preview-text">
+          <div class="reply-preview-author" id="reply-preview-author">—</div>
+          <div class="reply-preview-snippet" id="reply-preview-snippet">—</div>
+        </div>
+        <div class="icon-btn" style="width:30px;height:30px;" onclick="cancelReply()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></div>
+      </div>
       <div class="composer" id="chat-composer">
         <div class="attach-btn" onclick="document.getElementById('media-file').click()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M21.4 11.6L12.4 20.6C10.1 22.9 6.4 22.9 4.1 20.6C1.8 18.3 1.8 14.6 4.1 12.3L13.1 3.3C14.7 1.7 17.3 1.7 18.9 3.3C20.5 4.9 20.5 7.5 18.9 9.1L9.9 18.1C9.1 18.9 7.8 18.9 7 18.1C6.2 17.3 6.2 16 7 15.2L15.3 6.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <input type="file" accept="image/*,video/*" id="media-file" class="hidden-input" onchange="onMediaChosen(event)">
@@ -995,11 +1022,13 @@ async function openConversation(chatId, roomData){
   }
 
   go('conv');
+  cancelReply();
 
   if(msgsUnsub) msgsUnsub();
   const body = document.getElementById('conv-body');
   body.innerHTML = '<div class="spinner"></div>';
   let isFirstSnapshot = true;
+  const otherUids = getOtherParticipantUids(roomData);
 
   msgsUnsub = db.collection('chats').doc(chatId).collection('messages')
     .orderBy('createdAt', 'asc')
@@ -1019,8 +1048,7 @@ async function openConversation(chatId, roomData){
         body.innerHTML = `<div class="empty-state"><div class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 3L14.5 9L21 9.5L16 13.8L17.5 20.5L12 17L6.5 20.5L8 13.8L3 9.5L9.5 9L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div><h3>Пока пусто</h3><p>Напишите первое сообщение.</p></div>`;
         return;
       }
-      
-      let lastSender = "";
+
       let visibleCount = 0;
       snap.forEach(doc=>{
         const m = doc.data();
@@ -1032,9 +1060,21 @@ async function openConversation(chatId, roomData){
         div.className = 'bubble ' + (isMe ? 'out' : 'in');
         div.setAttribute('data-msg-id', doc.id);
 
+        // Отмечаем как прочитанное, если сообщение не моё и я его ещё не отмечал
+        if(!isMe && roomData.isType !== 'self' && !(m.readBy || []).includes(me.uid)){
+          doc.ref.update({ readBy: firebase.firestore.FieldValue.arrayUnion(me.uid) }).catch(()=>{});
+        }
+
         let html = '';
         if((roomData.isType === 'group' || roomData.isType === 'channel') && !isMe) {
           html += `<span class="msg-author">${escapeHtml(m.senderName || 'Участник')}</span>`;
+        }
+
+        if(m.replyTo){
+          html += `<div class="msg-reply-quote" data-goto-msg="${m.replyTo.id}">
+            <div class="msg-reply-author">${escapeHtml(m.replyTo.senderName || 'Сообщение')}</div>
+            <div class="msg-reply-snippet">${escapeHtml(m.replyTo.text || '')}</div>
+          </div>`;
         }
 
         if(m.imageURL) html += `<img src="${m.imageURL}">`;
@@ -1047,15 +1087,49 @@ async function openConversation(chatId, roomData){
             </div>`;
         }
         if(m.text) html += escapeHtml(m.text);
-        html += `<span class="time">${fmtTime(m.createdAt)}</span>`;
+
+        html += `<span class="time">${fmtTime(m.createdAt)}`;
+        if(m.edited) html += `<span class="msg-edited-tag">(изменено)</span>`;
+        if(isMe && roomData.isType !== 'self'){
+          const seenByOther = otherUids.length > 0 && otherUids.some(uid => (m.readBy || []).includes(uid));
+          html += `<span class="msg-ticks">${seenByOther ? tickSvgDouble() : tickSvgSingle()}</span>`;
+        }
+        html += `</span>`;
         div.innerHTML = html;
 
-        const delBtn = document.createElement('div');
-        delBtn.className = 'msg-del-btn';
-        delBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`;
-        delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteMessage(chatId, doc.id, isMe); };
-        div.appendChild(delBtn);
+        const quoteEl = div.querySelector('.msg-reply-quote');
+        if(quoteEl){
+          quoteEl.onclick = (e)=>{
+            e.stopPropagation();
+            const target = document.querySelector(`[data-msg-id="${quoteEl.getAttribute('data-goto-msg')}"]`);
+            if(target){ target.scrollIntoView({behavior:'smooth', block:'center'}); }
+          };
+        }
 
+        const actions = document.createElement('div');
+        actions.className = 'msg-actions';
+
+        const replyBtn = document.createElement('div');
+        replyBtn.className = 'msg-action-btn';
+        replyBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M9 10L4 15L9 20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15H15C18 15 20 13 20 10C20 7 18 5 15 5H10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+        replyBtn.onclick = (e) => { e.stopPropagation(); startReply(doc.id, m, isMe); };
+        actions.appendChild(replyBtn);
+
+        if(isMe && m.text && !m.imageURL && !m.videoURL && !m.audioURL){
+          const editBtn = document.createElement('div');
+          editBtn.className = 'msg-action-btn';
+          editBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M4 20L4.7 17L15.5 6.2C16 5.7 16.8 5.7 17.3 6.2L18.8 7.7C19.3 8.2 19.3 9 18.8 9.5L8 20.3L4 20Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
+          editBtn.onclick = (e) => { e.stopPropagation(); handleEditMessage(chatId, doc.id, m.text); };
+          actions.appendChild(editBtn);
+        }
+
+        const delBtn = document.createElement('div');
+        delBtn.className = 'msg-action-btn danger';
+        delBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`;
+        delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteMessage(chatId, doc.id, isMe); };
+        actions.appendChild(delBtn);
+
+        div.appendChild(actions);
         body.appendChild(div);
       });
       if(visibleCount === 0){
@@ -1066,6 +1140,59 @@ async function openConversation(chatId, roomData){
       body.innerHTML = `<div class="empty-state"><h3>Ошибка загрузки</h3><p>${escapeHtml(err.message||'')}</p></div>`;
     });
 }
+
+function getOtherParticipantUids(roomData){
+  if(roomData.peerData) return [roomData.peerData.uid];
+  if(Array.isArray(roomData.participants)) return roomData.participants.filter(u => u !== me.uid);
+  return [];
+}
+
+function tickSvgSingle(){
+  return `<svg width="14" height="10" viewBox="0 0 16 11" fill="none"><path d="M1 6L5.5 10L15 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+function tickSvgDouble(){
+  return `<svg width="18" height="10" viewBox="0 0 20 11" fill="none"><path d="M1 6L5.5 10L15 1" stroke="#4f8ef7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 6L10.5 10L20 1" stroke="#4f8ef7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+/* ===================== ОТВЕТ НА СООБЩЕНИЕ ===================== */
+let currentReplyTo = null;
+
+function startReply(msgId, m, isMe){
+  let preview = m.text || (m.imageURL ? '📷 Фото' : (m.videoURL ? '📹 Видео' : (m.audioURL ? '🎙 Голосовое' : 'Сообщение')));
+  if(preview.length > 60) preview = preview.slice(0, 60) + '…';
+  currentReplyTo = {
+    id: msgId,
+    preview,
+    senderName: isMe ? 'Вы' : (m.senderName || 'Собеседник')
+  };
+  document.getElementById('reply-preview-author').textContent = currentReplyTo.senderName;
+  document.getElementById('reply-preview-snippet').textContent = currentReplyTo.preview;
+  document.getElementById('reply-preview-bar').style.display = 'flex';
+  document.getElementById('msg-input').focus();
+}
+
+function cancelReply(){
+  currentReplyTo = null;
+  const bar = document.getElementById('reply-preview-bar');
+  if(bar) bar.style.display = 'none';
+}
+
+/* ===================== РЕДАКТИРОВАНИЕ СООБЩЕНИЯ ===================== */
+async function handleEditMessage(chatId, msgId, oldText){
+  const newText = prompt('Изменить сообщение:', oldText);
+  if(newText === null) return;
+  const trimmed = newText.trim();
+  if(!trimmed || trimmed === oldText) return;
+  try{
+    await db.collection('chats').doc(chatId).collection('messages').doc(msgId).update({
+      text: trimmed, edited: true
+    });
+    showToast('Сообщение изменено');
+  }catch(e){
+    showToast('Не удалось изменить: ' + (e.message || ''));
+  }
+}
+
 
 async function ensureChatDoc(chatId, rData){
   // merge:true — досоздаёт недостающие поля даже если документ уже существует,
@@ -1081,14 +1208,18 @@ async function sendTextMessage(){
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
   if(!text || !currentChatId) return;
+  const replyPayload = currentReplyTo ? { id: currentReplyTo.id, text: currentReplyTo.preview, senderName: currentReplyTo.senderName } : null;
   input.value = ''; updateSendBtn();
+  cancelReply();
   try{
     if(currentChatData && currentChatData.isType === 'direct') {
       await ensureChatDoc(currentChatId, currentChatData);
     }
-    await db.collection('chats').doc(currentChatId).collection('messages').add({
-      senderId: me.uid, senderName: me.name, text, createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
+    const msgData = {
+      senderId: me.uid, senderName: me.name, text, readBy: [me.uid], createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    if(replyPayload) msgData.replyTo = replyPayload;
+    await db.collection('chats').doc(currentChatId).collection('messages').add(msgData);
     await db.collection('chats').doc(currentChatId).set({
       lastMessage: text, lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     }, {merge:true});
@@ -1123,9 +1254,13 @@ async function toggleAudioRecord(){
             if(currentChatData && currentChatData.isType === 'direct') {
               await ensureChatDoc(currentChatId, currentChatData);
             }
-            await db.collection('chats').doc(currentChatId).collection('messages').add({
-              senderId: me.uid, senderName: me.name, audioURL: base64Audio, createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            });
+            const replyPayload = currentReplyTo ? { id: currentReplyTo.id, text: currentReplyTo.preview, senderName: currentReplyTo.senderName } : null;
+            const msgData = {
+              senderId: me.uid, senderName: me.name, audioURL: base64Audio, readBy: [me.uid], createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            };
+            if(replyPayload) msgData.replyTo = replyPayload;
+            cancelReply();
+            await db.collection('chats').doc(currentChatId).collection('messages').add(msgData);
             await db.collection('chats').doc(currentChatId).set({
               lastMessage: '🎙 Голосовое сообщение', lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             }, {merge:true});
@@ -1188,9 +1323,13 @@ function onMediaChosen(e){
         if(currentChatData && currentChatData.isType === 'direct') {
           await ensureChatDoc(currentChatId, currentChatData);
         }
-        await db.collection('chats').doc(currentChatId).collection('messages').add({
-          senderId: me.uid, senderName: me.name, videoURL: ev.target.result, createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
+        const replyPayload = currentReplyTo ? { id: currentReplyTo.id, text: currentReplyTo.preview, senderName: currentReplyTo.senderName } : null;
+        const msgData = {
+          senderId: me.uid, senderName: me.name, videoURL: ev.target.result, readBy: [me.uid], createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+        if(replyPayload) msgData.replyTo = replyPayload;
+        cancelReply();
+        await db.collection('chats').doc(currentChatId).collection('messages').add(msgData);
         await db.collection('chats').doc(currentChatId).set({
           lastMessage: '📹 Видеозапись', lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, {merge:true});
@@ -1209,9 +1348,13 @@ function onMediaChosen(e){
           if(currentChatData && currentChatData.isType === 'direct') {
             await ensureChatDoc(currentChatId, currentChatData);
           }
-          await db.collection('chats').doc(currentChatId).collection('messages').add({
-            senderId: me.uid, senderName: me.name, imageURL: dataUrl, createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
+          const replyPayload = currentReplyTo ? { id: currentReplyTo.id, text: currentReplyTo.preview, senderName: currentReplyTo.senderName } : null;
+          const msgData = {
+            senderId: me.uid, senderName: me.name, imageURL: dataUrl, readBy: [me.uid], createdAt: firebase.firestore.FieldValue.serverTimestamp()
+          };
+          if(replyPayload) msgData.replyTo = replyPayload;
+          cancelReply();
+          await db.collection('chats').doc(currentChatId).collection('messages').add(msgData);
           await db.collection('chats').doc(currentChatId).set({
             lastMessage: '📷 Фото', lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
           }, {merge:true});
@@ -1284,7 +1427,7 @@ function renderPeopleRows(items){
 
     let avatarInner = p.avatarURL ? `<img src="${p.avatarURL}">` : initials(p.name);
     let dotHtml = '';
-    if(!p.isType){
+    if(p.isType !== 'group' && p.isType !== 'channel'){
       dotHtml = `<div class="presence-dot ${isOnline(p) ? 'online' : 'offline'}"></div>`;
     }
 
