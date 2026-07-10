@@ -138,6 +138,9 @@
   .row-del-btn:active{ background:rgba(255,92,124,0.15); color:var(--danger); }
   .msg-del-btn{ position:absolute; top:-7px; right:-7px; width:20px; height:20px; border-radius:50%; background:var(--bg-panel); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--text-dim); cursor:pointer; }
   .msg-del-btn:active{ background:var(--danger); color:#fff; border-color:transparent; }
+  .presence-dot{ position:absolute; bottom:1px; right:1px; width:13px; height:13px; border-radius:50%; border:3px solid var(--bg-deep); z-index:2; }
+  .presence-dot.online{ background:#3ecf5f; }
+  .presence-dot.offline{ background:#6b7280; }
 
   .auth-box{ padding:30px 24px; flex:1; display:flex; flex-direction:column; justify-content:center; }
   .auth-header{ margin-bottom:28px; }
@@ -291,6 +294,7 @@
         </div>
         <div class="info-list">
           <div class="info-card"><div class="info-row"><div class="lbl">Описание</div><div class="static-val" id="person-bio">—</div></div></div>
+          <div class="info-card" id="person-count-card" style="display:none;"><div class="info-row"><div class="lbl" id="person-count-label">Подписчики</div><div class="static-val" id="person-count">0</div></div></div>
           <div class="info-card"><div class="info-row"><div class="lbl">Создан</div><div class="static-val" id="person-since">—</div></div></div>
         </div>
       </div>
@@ -311,7 +315,7 @@
             <div class="switch on" id="theme-switch" onclick="toggleTheme()"><div class="knob"></div></div>
           </div>
           <div class="set-row"><div class="set-ico" style="background:linear-gradient(135deg,#ff5c7c,#ff8a45)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 3C12 3 6 8 6 13.5C6 17.6 8.7 21 12 21C15.3 21 18 17.6 18 13.5C18 8 12 3 12 3Z" stroke="#0a0c10" stroke-width="2" stroke-linejoin="round"/></svg></div>
-            <div><div class="set-title">Звук уведомлений</div><div class="set-sub">Сигнал при новом входящем сообщении</div></div>
+            <div><div class="set-title">Уведомления</div><div class="set-sub">Системное уведомление и звук на новое сообщение</div></div>
             <div class="switch on" id="notif-switch" onclick="toggleNotif()"><div class="knob"></div></div>
           </div>
         </div>
@@ -478,6 +482,8 @@ function enterApp(){
   renderMyProfileUI();
   applyTheme();
   applySettingsSwitches();
+  startPresenceHeartbeat();
+  setupGlobalNotificationListener();
   go('chats');
 }
 
@@ -552,11 +558,6 @@ async function doLogin(){
   }
 }
 
-async function logout(){
-  if(!confirm('Выйти из аккаунта?')) return;
-  if(msgsUnsub) msgsUnsub();
-  await auth.signOut();
-}
 
 /* ===================== СОЗДАНИЕ ЗАКРЫТЫХ ГРУПП ===================== */
 let selectedGroupMembers = new Set();
@@ -833,7 +834,11 @@ listEl.appendChild(favRow);
 async function logout(){
   if(!confirm('Выйти из аккаунта?')) return;
   if(msgsUnsub) msgsUnsub();
-  if(chatsUnsub) { chatsUnsub(); chatsUnsub = null; } // Отключаем слушатель списка чатов
+  if(chatsUnsub) { chatsUnsub(); chatsUnsub = null; }
+  if(peopleUnsub) { peopleUnsub(); peopleUnsub = null; }
+  if(globalNotifUnsub) { globalNotifUnsub(); globalNotifUnsub = null; }
+  if(presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
+  try{ await db.collection('users').doc(me.uid).update({ lastSeen: null }); }catch(e){}
   await auth.signOut();
 }
 
@@ -965,7 +970,12 @@ async function openConversation(chatId, roomData){
   } else if(roomData.isType === 'group' || roomData.isType === 'channel'){
     avatarEl.innerHTML = roomData.avatarURL ? `<img src="${roomData.avatarURL}">` : initials(roomData.name);
     nameEl.textContent = roomData.name;
-    statusEl.textContent = roomData.isType === 'group' ? (roomData.isPrivate ? 'Закрытая группа' : 'Открытая группа') : 'Публичный канал';
+    const memberCount = Array.isArray(roomData.participants) ? roomData.participants.length : 1;
+    if(roomData.isType === 'group'){
+      statusEl.textContent = (roomData.isPrivate ? 'Закрытая группа' : 'Открытая группа') + ` · Участники: ${memberCount}`;
+    }else{
+      statusEl.textContent = `Публичный канал · Подписчики: ${Math.max(0, memberCount - 1)}`;
+    }
 
     if(roomData.isType === 'group' && roomData.creatorId === me.uid){
       avatarEl.style.cursor = 'pointer';
@@ -1080,7 +1090,7 @@ async function sendTextMessage(){
       senderId: me.uid, senderName: me.name, text, createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     await db.collection('chats').doc(currentChatId).set({
-      lastMessage: text, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      lastMessage: text, lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     }, {merge:true});
   }catch(e){
     showToast('Не удалось отправить: ' + (e.message || ''));
@@ -1117,7 +1127,7 @@ async function toggleAudioRecord(){
               senderId: me.uid, senderName: me.name, audioURL: base64Audio, createdAt: firebase.firestore.FieldValue.serverTimestamp()
             });
             await db.collection('chats').doc(currentChatId).set({
-              lastMessage: '🎙 Голосовое сообщение', updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+              lastMessage: '🎙 Голосовое сообщение', lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             }, {merge:true});
           } catch(err) { showToast('Ошибка отправки аудио: ' + err.message); }
         };
@@ -1182,7 +1192,7 @@ function onMediaChosen(e){
           senderId: me.uid, senderName: me.name, videoURL: ev.target.result, createdAt: firebase.firestore.FieldValue.serverTimestamp()
         });
         await db.collection('chats').doc(currentChatId).set({
-          lastMessage: '📹 Видеозапись', updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          lastMessage: '📹 Видеозапись', lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, {merge:true});
       } catch(err) { showToast('Ошибка отправки: ' + err.message); }
     };
@@ -1203,7 +1213,7 @@ function onMediaChosen(e){
             senderId: me.uid, senderName: me.name, imageURL: dataUrl, createdAt: firebase.firestore.FieldValue.serverTimestamp()
           });
           await db.collection('chats').doc(currentChatId).set({
-            lastMessage: '📷 Фото', updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            lastMessage: '📷 Фото', lastMessageSenderId: me.uid, updatedAt: firebase.firestore.FieldValue.serverTimestamp()
           }, {merge:true});
         }catch(err){ showToast('Ошибка: ' + err.message); }
       };
@@ -1221,22 +1231,31 @@ function updateSendBtn(){ document.getElementById('send-btn').classList.toggle('
 
 /* ===================== PEOPLE & COMMUNITIES DIRECTORY ===================== */
 let allPeopleItems = [];
+let peopleUnsub = null;
+const ONLINE_THRESHOLD_MS = 60000; // считаем "в сети", если heartbeat был меньше 60 сек назад
 
-async function loadPeople(forceToast){
+function isOnline(p){
+  if(!p.lastSeen || typeof p.lastSeen.toMillis !== 'function') return false;
+  return (Date.now() - p.lastSeen.toMillis()) < ONLINE_THRESHOLD_MS;
+}
+
+function loadPeople(forceToast){
   const listEl = document.getElementById('people-list');
+  if(peopleUnsub){
+    if(forceToast) showToast('Список уже обновляется в реальном времени');
+    return;
+  }
   listEl.innerHTML = '<div class="spinner"></div>';
-  try{
-    const snap = await db.collection('users').limit(200).get();
+  peopleUnsub = db.collection('users').limit(200).onSnapshot(snap=>{
     const items = [];
     snap.forEach(doc=>{ items.push({uid: doc.id, ...doc.data()}); peopleCache[doc.id] = doc.data(); });
     items.sort((a,b)=> (a.name||a.username).localeCompare(b.name||b.username));
     allPeopleItems = items;
-
-    renderPeopleRows(items);
+    filterPeople();
     if(forceToast) showToast('Список обновлён');
-  }catch(e){
-    listEl.innerHTML = `<div class="empty-state"><h3>Не удалось загрузить</h3><p>${escapeHtml(e.message||'')}</p></div>`;
-  }
+  }, err=>{
+    listEl.innerHTML = `<div class="empty-state"><h3>Не удалось загрузить</h3><p>${escapeHtml(err.message||'')}</p></div>`;
+  });
 }
 
 function renderPeopleRows(items){
@@ -1251,14 +1270,29 @@ function renderPeopleRows(items){
     let tag = p.isType === 'group' ? '<span class="type-tag group">группа</span>' : (p.isType === 'channel' ? '<span class="type-tag channel">канал</span>' : '');
     if(isMe) tag = '<span class="you-tag">ВЫ</span>';
 
+    let previewText;
+    if(p.isType === 'group' || p.isType === 'channel'){
+      const count = Array.isArray(p.participants) ? p.participants.length : 1;
+      previewText = p.isType === 'channel' ? `Подписчики: ${Math.max(0, count - 1)}` : `Участники: ${count}`;
+    } else {
+      previewText = '@' + escapeHtml(p.username);
+    }
+
     const row = document.createElement('div');
     row.className = 'row';
     row.onclick = ()=> openPerson(p);
+
+    let avatarInner = p.avatarURL ? `<img src="${p.avatarURL}">` : initials(p.name);
+    let dotHtml = '';
+    if(!p.isType){
+      dotHtml = `<div class="presence-dot ${isOnline(p) ? 'online' : 'offline'}"></div>`;
+    }
+
     row.innerHTML = `
-      <div class="avatar">${p.avatarURL ? `<img src="${p.avatarURL}">` : initials(p.name)}</div>
+      <div class="avatar">${avatarInner}${dotHtml}</div>
       <div class="row-meta">
         <div class="row-top"><div class="row-name">${escapeHtml(p.name || p.username)} ${tag}</div></div>
-        <div class="row-preview">${p.isType === 'group' || p.isType === 'channel' ? 'Нажмите, чтобы вступить/открыть' : '@'+escapeHtml(p.username)}</div>
+        <div class="row-preview">${previewText}</div>
       </div>`;
     listEl.appendChild(row);
   });
@@ -1273,6 +1307,22 @@ function filterPeople(){
   renderPeopleRows(filtered);
 }
 
+/* ===================== ONLINE-СТАТУС (heartbeat) ===================== */
+let presenceInterval = null;
+async function updateMyPresence(){
+  if(!me || !db) return;
+  try{
+    await db.collection('users').doc(me.uid).update({ lastSeen: firebase.firestore.FieldValue.serverTimestamp() });
+  }catch(e){ /* тихо игнорируем, не критично */ }
+}
+function startPresenceHeartbeat(){
+  updateMyPresence();
+  if(presenceInterval) clearInterval(presenceInterval);
+  presenceInterval = setInterval(updateMyPresence, 25000);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) updateMyPresence(); });
+}
+
+
 function openPerson(p){
   document.getElementById('person-profile-title').textContent = p.isType === 'group' ? 'Группа' : (p.isType === 'channel' ? 'Канал' : 'Пользователь');
   const avatarEl = document.getElementById('person-avatar');
@@ -1283,6 +1333,16 @@ function openPerson(p){
   const created = p.createdAt && p.createdAt.toDate ? p.createdAt.toDate() : null;
   document.getElementById('person-since').textContent = created ? created.toLocaleDateString('ru-RU', {day:'numeric', month:'long', year:'numeric'}) : '—';
 
+  const countCard = document.getElementById('person-count-card');
+  if(p.isType === 'group' || p.isType === 'channel'){
+    countCard.style.display = 'block';
+    const count = Array.isArray(p.participants) ? p.participants.length : 1;
+    document.getElementById('person-count-label').textContent = p.isType === 'channel' ? 'Подписчики' : 'Участники';
+    document.getElementById('person-count').textContent = p.isType === 'channel' ? Math.max(0, count - 1) : count;
+  }else{
+    countCard.style.display = 'none';
+  }
+
   const writeBtn = document.getElementById('person-write-btn');
   writeBtn.textContent = p.isType === 'group' || p.isType === 'channel' ? 'Войти и читать' : 'Написать сообщение';
   
@@ -1292,6 +1352,9 @@ function openPerson(p){
         await db.collection('chats').doc(p.uid).update({
           participants: firebase.firestore.FieldValue.arrayUnion(me.uid)
         });
+        await db.collection('users').doc(p.uid).update({
+          participants: firebase.firestore.FieldValue.arrayUnion(me.uid)
+        }).catch(()=>{});
         openConversation(p.uid, p);
       } catch(e) {
         openConversation(p.uid, p);
@@ -1409,11 +1472,27 @@ function toggleTheme(){
   applyTheme(); saveSettingsLocal();
   document.getElementById('theme-switch').classList.toggle('on', settings.theme === 'dark');
 }
-function toggleNotif(){
+async function toggleNotif(){
   settings.notifications = !settings.notifications;
   saveSettingsLocal();
   document.getElementById('notif-switch').classList.toggle('on', settings.notifications);
-  showToast(settings.notifications ? 'Звук уведомлений включён' : 'Звук уведомлений выключен');
+
+  if(settings.notifications && 'Notification' in window){
+    if(Notification.permission === 'default'){
+      const result = await Notification.requestPermission();
+      if(result === 'granted'){
+        showToast('Уведомления включены');
+      }else{
+        showToast('Браузер запретил уведомления — разрешите их в настройках сайта');
+      }
+      return;
+    }
+    if(Notification.permission === 'denied'){
+      showToast('Уведомления заблокированы в настройках браузера для этого сайта');
+      return;
+    }
+  }
+  showToast(settings.notifications ? 'Уведомления включены' : 'Уведомления выключены');
 }
 function playNotifSound(){
   try{
@@ -1428,6 +1507,73 @@ function playNotifSound(){
   }catch(e){}
 }
 applyTheme();
+
+/* ===================== СИСТЕМНЫЕ УВЕДОМЛЕНИЯ (глобально, не только в открытом чате) ===================== */
+let globalNotifUnsub = null;
+let chatBaselineTimes = {};
+
+async function requestNotifPermissionIfNeeded(){
+  if(!('Notification' in window)) return;
+  if(settings.notifications && Notification.permission === 'default'){
+    try{ await Notification.requestPermission(); }catch(e){}
+  }
+}
+
+function showBrowserNotification(title, body){
+  if('Notification' in window && Notification.permission === 'granted'){
+    try{
+      const n = new Notification(title, { body });
+      n.onclick = ()=>{ window.focus(); n.close(); };
+    }catch(e){}
+  }
+  playNotifSound();
+}
+
+function setupGlobalNotificationListener(){
+  if(globalNotifUnsub) return;
+  requestNotifPermissionIfNeeded();
+
+  let isFirstSnap = true;
+  globalNotifUnsub = db.collection('chats')
+    .where('participants', 'array-contains', me.uid)
+    .onSnapshot(snap=>{
+      if(isFirstSnap){
+        snap.forEach(doc=>{
+          const d = doc.data();
+          chatBaselineTimes[doc.id] = d.updatedAt ? d.updatedAt.toMillis() : 0;
+        });
+        isFirstSnap = false;
+        return;
+      }
+      snap.docChanges().forEach(change=>{
+        if(change.type !== 'modified' && change.type !== 'added') return;
+        const d = change.doc.data();
+        const chatId = change.doc.id;
+        if(chatId === selfChatId()) return;
+        if(d.lastMessageSenderId === me.uid) return; // моё собственное сообщение
+
+        const t = d.updatedAt ? d.updatedAt.toMillis() : 0;
+        if(t <= (chatBaselineTimes[chatId] || 0)) return;
+        chatBaselineTimes[chatId] = t;
+
+        if(!settings.notifications) return;
+        // не уведомляем, если этот чат уже открыт на активной вкладке
+        if(currentChatId === chatId && !document.hidden) return;
+
+        let title = 'Новое сообщение в Tello';
+        if(d.isType === 'group' || d.isType === 'channel'){
+          title = d.name || title;
+        } else if(Array.isArray(d.participants)){
+          const otherUid = d.participants.find(u => u !== me.uid);
+          if(otherUid && peopleCache[otherUid]){
+            title = peopleCache[otherUid].name || peopleCache[otherUid].username || title;
+          }
+        }
+        showBrowserNotification(title, d.lastMessage || 'Новое сообщение');
+      });
+    }, err=>{ /* тихо игнорируем сетевые ошибки слушателя */ });
+}
+
 
 /* ===================== СМЕНА ПАРОЛЯ ===================== */
 async function changePassword(){
