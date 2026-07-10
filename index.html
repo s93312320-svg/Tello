@@ -134,6 +134,10 @@
   .search-box input{ width:100%; height:42px; border-radius:21px; background:var(--bg-panel); border:1px solid var(--line); padding:0 16px; color:var(--text-main); font-size:14px; outline:none; font-family:'Inter',sans-serif; }
   .search-box input::placeholder{ color:var(--text-faint); }
   .group-create-footer{ padding:14px 18px calc(env(safe-area-inset-bottom) + 16px); border-top:1px solid var(--line); flex:0 0 auto; }
+  .row-del-btn{ margin-left:auto; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--text-faint); flex-shrink:0; }
+  .row-del-btn:active{ background:rgba(255,92,124,0.15); color:var(--danger); }
+  .msg-del-btn{ position:absolute; top:-7px; right:-7px; width:20px; height:20px; border-radius:50%; background:var(--bg-panel); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--text-dim); cursor:pointer; }
+  .msg-del-btn:active{ background:var(--danger); color:#fff; border-color:transparent; }
 
   .auth-box{ padding:30px 24px; flex:1; display:flex; flex-direction:column; justify-content:center; }
   .auth-header{ margin-bottom:28px; }
@@ -231,6 +235,7 @@
           <div class="conv-name" id="conv-name">—</div>
           <div class="conv-status" id="conv-status">—</div>
         </div>
+        <div class="icon-btn" id="conv-delete-btn" style="margin-left:auto;" onclick="deleteCurrentConversation()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 7H19M9 7V4.5C9 4 9.4 3.5 10 3.5H14C14.6 3.5 15 4 15 4.5V7M17 7L16.3 19C16.2 20.1 15.3 21 14.2 21H9.8C8.7 21 7.8 20.1 7.7 19L7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
       </div>
       <div class="conv-body" id="conv-body"></div>
       <div class="composer" id="chat-composer">
@@ -814,6 +819,11 @@ listEl.appendChild(favRow);
             <div class="row-top"><div class="row-name">${escapeHtml(title)} ${tagHtml}</div><div class="row-time">${r.updatedAt ? fmtTime(r.updatedAt) : ''}</div></div>
             <div class="row-preview">${escapeHtml(subText)}</div>
           </div>`;
+        const delBtn = document.createElement('div');
+        delBtn.className = 'row-del-btn';
+        delBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 7H19M9 7V4.5C9 4 9.4 3.5 10 3.5H14C14.6 3.5 15 4 15 4.5V7M17 7L16.3 19C16.2 20.1 15.3 21 14.2 21H9.8C8.7 21 7.8 20.1 7.7 19L7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+        delBtn.onclick = (e) => { e.stopPropagation(); handleRowDelete(r); };
+        row.appendChild(delBtn);
         listEl.appendChild(row);
       }
     }, err => {
@@ -826,6 +836,107 @@ async function logout(){
   if(chatsUnsub) { chatsUnsub(); chatsUnsub = null; } // Отключаем слушатель списка чатов
   await auth.signOut();
 }
+
+/* ===================== УДАЛЕНИЕ ЧАТОВ / ГРУПП / КАНАЛОВ ===================== */
+
+// Полностью удаляет комнату и все сообщения (для группы/канала — только у создателя)
+async function deleteRoomCompletely(chatId, alsoDeleteUsersDoc){
+  const msgsSnap = await db.collection('chats').doc(chatId).collection('messages').get();
+  let batch = db.batch();
+  let count = 0;
+  for(const docSnap of msgsSnap.docs){
+    batch.delete(docSnap.ref);
+    count++;
+    if(count % 400 === 0){ await batch.commit(); batch = db.batch(); }
+  }
+  await batch.commit();
+  await db.collection('chats').doc(chatId).delete();
+  if(alsoDeleteUsersDoc){
+    await db.collection('users').doc(chatId).delete().catch(()=>{});
+  }
+}
+
+// Возвращает true, если удаление/выход реально произошли
+async function performChatDeletion(chatId, roomData){
+  if(roomData.isType === 'self') return false; // Избранное удалить нельзя
+
+  const isOwner = roomData.creatorId === me.uid;
+
+  if(roomData.isType === 'group' || roomData.isType === 'channel'){
+    const label = roomData.isType === 'group' ? 'группу' : 'канал';
+    if(isOwner){
+      if(!confirm(`Удалить ${label} «${roomData.name}» для всех участников? Это необратимо.`)) return false;
+      await deleteRoomCompletely(chatId, roomData.isType === 'channel');
+      showToast((roomData.isType === 'group' ? 'Группа' : 'Канал') + ' удалена(-ён)');
+    }else{
+      if(!confirm(`Покинуть ${label} «${roomData.name}»?`)) return false;
+      await db.collection('chats').doc(chatId).update({ participants: firebase.firestore.FieldValue.arrayRemove(me.uid) });
+      showToast('Вы покинули ' + label);
+    }
+    return true;
+  }
+
+  // обычный личный чат
+  if(!confirm('Удалить этот чат из списка? У собеседника переписка останется.')) return false;
+  await db.collection('chats').doc(chatId).update({ participants: firebase.firestore.FieldValue.arrayRemove(me.uid) });
+  showToast('Чат удалён');
+  return true;
+}
+
+async function handleRowDelete(r){
+  try{
+    const done = await performChatDeletion(r.id, r);
+    if(done && currentChatId === r.id){ go('chats'); }
+  }catch(e){
+    showToast('Ошибка: ' + e.message);
+  }
+}
+
+async function deleteCurrentConversation(){
+  if(!currentChatId || !currentChatData || currentChatData.isType === 'self') return;
+  try{
+    const done = await performChatDeletion(currentChatId, currentChatData);
+    if(done) go('chats');
+  }catch(e){
+    showToast('Ошибка: ' + e.message);
+  }
+}
+
+/* ===================== УДАЛЕНИЕ ОТДЕЛЬНЫХ СООБЩЕНИЙ =====================
+   Свои сообщения — удаляются из базы для всех.
+   Чужие сообщения — просто скрываются локально, только у вас (хранится в localStorage). */
+function getHiddenMessagesMap(){
+  return JSON.parse(localStorage.getItem('tello-hidden-msgs') || '{}');
+}
+function hideMessageLocally(chatId, msgId){
+  const hidden = getHiddenMessagesMap();
+  if(!hidden[chatId]) hidden[chatId] = [];
+  if(!hidden[chatId].includes(msgId)) hidden[chatId].push(msgId);
+  localStorage.setItem('tello-hidden-msgs', JSON.stringify(hidden));
+}
+function isMessageHiddenLocally(chatId, msgId){
+  const hidden = getHiddenMessagesMap();
+  return (hidden[chatId] || []).includes(msgId);
+}
+
+async function handleDeleteMessage(chatId, msgId, isMine){
+  if(isMine){
+    if(!confirm('Удалить это сообщение для всех?')) return;
+    try{
+      await db.collection('chats').doc(chatId).collection('messages').doc(msgId).delete();
+      showToast('Сообщение удалено');
+    }catch(e){
+      showToast('Ошибка: ' + e.message);
+    }
+  }else{
+    if(!confirm('Скрыть это сообщение только у себя? У собеседника оно останется.')) return;
+    hideMessageLocally(chatId, msgId);
+    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if(el) el.remove();
+    showToast('Сообщение скрыто у вас');
+  }
+}
+
 /* ===================== CONVERSATION ===================== */
 async function openConversation(chatId, roomData){
   currentChatId = chatId;
@@ -842,6 +953,9 @@ async function openConversation(chatId, roomData){
 
   avatarEl.onclick = null;
   avatarEl.style.cursor = 'default';
+
+  const delBtnHeader = document.getElementById('conv-delete-btn');
+  delBtnHeader.style.display = roomData.isType === 'self' ? 'none' : 'flex';
 
   if(roomData.isType === 'self'){
     avatarEl.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 3L14.5 9L21 9.5L16 13.8L17.5 20.5L12 17L6.5 20.5L8 13.8L3 9.5L9.5 9L12 3Z" fill="#0a0c10"/></svg>`;
@@ -897,12 +1011,17 @@ async function openConversation(chatId, roomData){
       }
       
       let lastSender = "";
+      let visibleCount = 0;
       snap.forEach(doc=>{
         const m = doc.data();
+        if(isMessageHiddenLocally(chatId, doc.id)) return; // сообщение скрыто локально у меня
+
+        visibleCount++;
         const div = document.createElement('div');
         const isMe = m.senderId === me.uid;
         div.className = 'bubble ' + (isMe ? 'out' : 'in');
-        
+        div.setAttribute('data-msg-id', doc.id);
+
         let html = '';
         if((roomData.isType === 'group' || roomData.isType === 'channel') && !isMe) {
           html += `<span class="msg-author">${escapeHtml(m.senderName || 'Участник')}</span>`;
@@ -920,8 +1039,18 @@ async function openConversation(chatId, roomData){
         if(m.text) html += escapeHtml(m.text);
         html += `<span class="time">${fmtTime(m.createdAt)}</span>`;
         div.innerHTML = html;
+
+        const delBtn = document.createElement('div');
+        delBtn.className = 'msg-del-btn';
+        delBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`;
+        delBtn.onclick = (e) => { e.stopPropagation(); handleDeleteMessage(chatId, doc.id, isMe); };
+        div.appendChild(delBtn);
+
         body.appendChild(div);
       });
+      if(visibleCount === 0){
+        body.innerHTML = `<div class="empty-state"><div class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 3L14.5 9L21 9.5L16 13.8L17.5 20.5L12 17L6.5 20.5L8 13.8L3 9.5L9.5 9L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div><h3>Пока пусто</h3><p>Напишите первое сообщение.</p></div>`;
+      }
       requestAnimationFrame(()=>{ body.scrollTop = body.scrollHeight; });
     }, err=>{
       body.innerHTML = `<div class="empty-state"><h3>Ошибка загрузки</h3><p>${escapeHtml(err.message||'')}</p></div>`;
@@ -929,16 +1058,13 @@ async function openConversation(chatId, roomData){
 }
 
 async function ensureChatDoc(chatId, rData){
-  const ref = db.collection('chats').doc(chatId);
-  const doc = await ref.get();
-  if(!doc.exists){
-    await ref.set({
-      participants: [me.uid, rData.peerData.uid],
-      isType: 'direct',
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      lastMessage: ''
-    });
-  }
+  // merge:true — досоздаёт недостающие поля даже если документ уже существует,
+  // это чинит старые сломанные чаты, а не только новые
+  await db.collection('chats').doc(chatId).set({
+    participants: [me.uid, rData.peerData.uid],
+    isType: 'direct',
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, {merge:true});
 }
 
 async function sendTextMessage(){
